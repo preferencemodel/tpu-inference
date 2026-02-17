@@ -5,7 +5,25 @@ from flax import nnx
 
 from vllm.config import VllmConfig
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.models.jax.jax_intermediate_tensor import JaxIntermediateTensors
 
+class Gemma3Model(nnx.Module): 
+    def __init__(
+        self, 
+        vllm_config: VllmConfig, 
+        rng: nnx.Rngs, mesh: 
+        jax.sharding.Mesh
+    ):
+        pass 
+    
+    def __call__(
+        self,
+        kv_caches: List[jax.Array],
+        input_ids: jax.Array,
+        attention_metadata: AttentionMetadata,
+        intermediate_tensors: JaxIntermediateTensors | None,
+    ): 
+        pass 
 
 class Gemma3ForCausalLM(nnx.Module):
     def __init__(
