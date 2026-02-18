@@ -3,8 +3,9 @@ from typing import List, Tuple
 import jax 
 import jax.numpy as jnp 
 from flax import nnx 
-
 from vllm.config import VllmConfig
+from transformers import GemmaConfig 
+
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.jax.jax_intermediate_tensor import JaxIntermediateTensors
 from tpu_inference.logger import init_logger
@@ -14,17 +15,14 @@ logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
 
-def apply_rope(x: jax.Array, base_freq: int, sacle_factor: float = 1.0) -> jax.Array: 
-    pass 
-
 class RMSNorm(nnx.Module): 
     def __init__(
         self, 
         dim: int, 
+        config: GemmaConfig,
         dtype: jnp.dtype,
-        eps: float = 1e-6
     ): 
-        self.eps = eps 
+        self.rms_norm_eps = config.rms_norm_eps 
         self.weight = nnx.Param(jnp.ones(dim, param_dtype=dtype))
     
     def __call__(self, x: jax.Array) -> jax.Array: 
@@ -34,43 +32,38 @@ class RMSNorm(nnx.Module):
 class Gemma3MLP(nnx.Module): 
     def __init__(
         self,
-        dim: int, 
-        hid_dim: int,
-        act_fn: str,
+        config: GemmaConfig,
         dtype: jnp.dtype, 
         rng: nnx.Rngs
     ): 
+        self.hidden_size = config.hidden_size 
+        self.intermediate_size = config.intermediate_size  
+        self.hidden_act = config.hidden_act
         self.gate_proj = nnx.Linear(
-            dim, 
-            hid_dim, 
+            in_features=self.hidden_size, 
+            out_features=self.intermediate_size, 
             use_bias=False, 
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (None, ShardingAxisName.MLP_TENSOR), 
-            ),
+            kernel_init=init_fn,
             rngs=rng 
         )
         self.up_proj = nnx.Linear(
-            dim, 
-            hid_dim, 
+            in_features=self.hidden_size, 
+            out_features=self.intermediate_size, 
             use_bias=False, 
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (None, ShardingAxisName.MLP_TENSOR), 
-            ),
+            kernel_init=init_fn, 
             rngs=rng 
         )
         self.down_proj = nnx.Linear(
-            hid_dim, 
-            dim, 
+            in_features=self.intermediate_size, 
+            out_features=self.hidden_size, 
             use_bias=False, 
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (ShardingAxisName.MLP_TENSOR, None), 
-            ),
+            kernel_init=init_fn,            
             rngs=rng 
         )
-        self.act_fn = {'gelu': lambda x: jax.nn.gelu(x, approximate=True), 'silu': lambda x: jax.nn.silu(x)}[act_fn]
+        self.act_fn = {'gelu_pytorch_tanh': lambda x: jax.nn.gelu(x, approximate=True)}[self.hidden_act]
     
     def __call__(
         self, 
@@ -80,7 +73,6 @@ class Gemma3MLP(nnx.Module):
         up = self.up_proj(x)
         fuse = gate * up 
         return self.down_proj(fuse)
-
 
 class Gemma3Model(nnx.Module): 
     def __init__(
@@ -129,12 +121,14 @@ class Gemma3ForCausalLM(nnx.Module):
 if __name__ == '__main__': 
     key = jax.random.key(42)
     rng = nnx.Rngs(key)
+    cfg = GemmaConfig(
+        hidden_size=1152, 
+        intermidate_size=6912,
+    )
     mlp = Gemma3MLP(
-        dim=1024,
-        hid_dim=3072,
-        act_fn='silu', 
+        config=cfg,
         dtype=jnp.bfloat16, 
         rng=rng
     )
-    res = mlp(jax.random.normal(jax.random.key(0), (2, 4, 1024)))
+    res = mlp(jax.random.normal(jax.random.key(0), (2, 4, cfg.hidden_size)))
     print(res)
