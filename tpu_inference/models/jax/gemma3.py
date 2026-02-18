@@ -148,6 +148,7 @@ class Gemma3Attention(nnx.Module):
         q = self.q_proj(x)
         q = self.q_norm(q)
         q = apply_rope(q, positions=md.input_positions, head_dim=self.head_dim, rope_theta=self.rope_theta)
+        q = q * self.query_pre_attn_scalar
 
         # k: (T, K, H)
         k = self.k_proj(x)
@@ -274,7 +275,7 @@ class Gemma3Model(nnx.Module):
                 rng=rng,
                 mesh=mesh,
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype, 
-                is_local=i % self.sliding_window_pattern != 0,
+                is_local=i + 1 % self.sliding_window_pattern != 0,
             ) for i in range(hf_config.num_hidden_layers)
         ]
         self.norm = RMSNorm(
