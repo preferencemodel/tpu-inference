@@ -326,14 +326,6 @@ class Gemma3ForCausalLM(nnx.Module):
             rng,
             mesh
         )
-        self.lm_head = nnx.Linear(
-            in_features=self.hidden_size,
-            out_features=self.vocab_size, 
-            use_bias=False, 
-            param_dtype=self.dtype,
-            kernel_init=init_fn, 
-            rngs=rng 
-        )
             
     def __call__(
         self,
@@ -353,7 +345,7 @@ class Gemma3ForCausalLM(nnx.Module):
         pass 
     
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        return self.lm_head(hidden_states)
+        return hidden_states @ self.model.embed.embedding.T
 
 
 # Playground :D
