@@ -251,16 +251,70 @@ class Gemma3Model(nnx.Module):
         rng: nnx.Rngs, 
         mesh: jax.sharding.Mesh
     ):
-        pass 
+        model_config = vllm_config.model_config
+        hf_config = model_config.hf_config 
+
+        self.vocab_size = model_config.get_vocab_size() 
+        self.dtype = model_config.dtype 
+        self.hidden_size = hf_config.hidden_size 
+        self.sliding_window_pattern = hf_config.sliding_window_pattern
+
+        self.embed = nnx.Embed(
+            num_embeddings=self.vocab_size, 
+            features=self.hidden_size, 
+            param_dype=self.dtype,
+            embedding_init=init_fn,
+            rngs=rng
+        ) 
+        self.layers = [
+            Gemma3DecoderLayer(
+                config=hf_config,
+                dtype=self.dtype,
+                rng=rng,
+                mesh=mesh,
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype, 
+                is_local=(i + 1) % self.sliding_window_pattern != 0,
+            ) for i in range(hf_config.num_hidden_layers)
+        ]
+        self.norm = RMSNorm(
+            self.hidden_size,
+            hf_config,
+            self.dtype
+        )
+        self.lm_head = nnx.Linear(
+            in_features=self.hidden_size,
+            out_features=self.vocab_size, 
+            use_bias=False, 
+            param_dtype=self.dtype,
+            kernel_init=init_fn, 
+            rngs=rng 
+        )
     
     def __call__(
         self,
         kv_caches: List[jax.Array],
-        input_ids: jax.Array,
+        input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
-        intermediate_tensors: JaxIntermediateTensors | None,
-    ): 
-        pass 
+        inputs_embeds: Optional[jax.Array] = None,
+    ) -> Tuple[jax.Array, jax.Array]:
+        if inputs_embeds is not None: 
+            x = inputs_embeds
+        else: 
+            x = self.embed(input_ids)
+        
+        for i, layer in enumerate(self.layers): 
+            kv_cache = kv_caches[i]
+            kv_cache, x = layer(
+                kv_cache,
+                x, 
+                attention_metadata
+            ) 
+            kv_caches[i] = kv_cache
+
+        x = self.norm(x)
+
+        return kv_caches, x 
+
 
 class Gemma3ForCausalLM(nnx.Module):
     def __init__(
