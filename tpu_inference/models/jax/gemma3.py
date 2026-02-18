@@ -41,7 +41,7 @@ class Gemma3MLP(nnx.Module):
     ): 
         self.hidden_size = config.hidden_size 
         self.intermediate_size = config.intermediate_size  
-        self.hidden_act = config.hidden_act
+        self.hidden_act = config.hidden_activation
         self.gate_proj = nnx.Linear(
             in_features=self.hidden_size, 
             out_features=self.intermediate_size, 
@@ -187,7 +187,7 @@ class Gemma3DecoderLayer(nnx.Module):
     ):  
         self.hidden_size = config.hidden_size 
     
-        self.input_layer_norm = RMSNorm(
+        self.input_layernorm = RMSNorm(
             dim=self.hidden_size, 
             config=config,
             dtype=dtype
@@ -200,7 +200,7 @@ class Gemma3DecoderLayer(nnx.Module):
             kv_cache_dtype, 
             is_local
         )
-        self.post_attn_layer_norm = RMSNorm(
+        self.post_attention_layernorm = RMSNorm(
             dim=self.hidden_size, 
             config=config,
             dtype=dtype
@@ -227,13 +227,13 @@ class Gemma3DecoderLayer(nnx.Module):
         x: jax.Array,
         attention_metadata: AttentionMetadata 
     ) -> Tuple[jax.Array, jax.Array]: 
-        x_norm = self.input_layer_norm(x)
+        x_norm = self.input_layernorm(x)
         kv_cache, attn_output = self.self_attn(
             kv_cache,
             x_norm, 
             attention_metadata 
         )
-        attn_output = self.post_attn_layer_norm(attn_output)
+        attn_output = self.post_attention_layernorm(attn_output)
         attn_output += x 
 
         outputs = self.pre_feedforward_layernorm(attn_output)
@@ -274,7 +274,7 @@ class Gemma3Model(nnx.Module):
                 rng=rng,
                 mesh=mesh,
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype, 
-                is_local=(i + 1) % self.sliding_window_pattern != 0,
+                is_local=i % self.sliding_window_pattern != 0,
             ) for i in range(hf_config.num_hidden_layers)
         ]
         self.norm = RMSNorm(
@@ -315,17 +315,19 @@ class Gemma3ForCausalLM(nnx.Module):
         mesh: jax.sharding.Mesh
     ):
         self.vllm_config = vllm_config
-        model_config = self.vllm_config.model_config
-        hf_config = model_config.hf_config 
+        self.model_config = self.vllm_config.model_config
+        self.hf_config = self.model_config.hf_config 
+        self.rng = nnx.Rngs(rng)
+        self.mesh = mesh
 
-        self.vocab_size = model_config.get_vocab_size() 
-        self.dtype = model_config.dtype 
-        self.hidden_size = hf_config.hidden_size 
+        self.vocab_size = self.model_config.get_vocab_size() 
+        self.dtype = self.model_config.dtype 
+        self.hidden_size = self.hf_config.hidden_size 
     
         self.model = Gemma3Model(
-            vllm_config,
-            rng,
-            mesh
+            self.vllm_config,
+            self.rng,
+            self.mesh
         )
             
     def __call__(
@@ -343,7 +345,29 @@ class Gemma3ForCausalLM(nnx.Module):
         return kv_caches, x, []
     
     def load_weights(self, rng_key: jax.Array): 
-        mappings = {}  
+        # NOTE: Since we are using nnx.eval_shape to init the model,
+        # we have to pass dynamic arrays here for __call__'s usage.
+        self.rng = nnx.Rngs(rng_key)
+
+        # Key: path to a HF layer weight
+        # Value: path to a nnx layer weight
+        mappings = {
+            "model.embed_tokens.weight": "model.embed.embedding",
+            "model.layers.*.mlp.down_proj.weight": "model.layers.*.mlp.down_proj.kernel",
+            "model.layers.*.mlp.gate_proj.weight": "model.layers.*.mlp.gate_proj.kernel",
+            "model.layers.*.mlp.up_proj.weight": "model.layers.*.mlp.up_proj.kernel",
+            "model.layers.*.self_attn.k_proj.weight": "model.layers.*.self_attn.k_proj.kernel",
+            "model.layers.*.self_attn.o_proj.weight": "model.layers.*.self_attn.o_proj.kernel",
+            "model.layers.*.self_attn.q_proj.weight": "model.layers.*.self_attn.q_proj.kernel",
+            "model.layers.*.self_attn.v_proj.weight": "model.layers.*.self_attn.v_proj.kernel",
+            "model.layers.*.input_layernorm.weight": "model.layers.*.input_layernorm.weight",
+            "model.layers.*.post_attention_layernorm.weight": "model.layers.*.post_attention_layernorm.weight",
+            "model.layers.*.pre_feedforward_layernorm.weight": "model.layers.*.pre_feedforward_layernorm.weight",
+            "model.layers.*.post_feedforward_layernorm.weight": "model.layers.*.post_feedforward_layernorm.weight",
+            "model.layers.*.self_attn.q_norm.weight": "model.layers.*.self_attn.q_norm.weight",
+            "model.layers.*.self_attn.k_norm.weight": "model.layers.*.self_attn.k_norm.weight",
+            "model.norm.weight": "model.norm.weight",
+        }
 
         loader = self.WeightLoader(self.vllm_config, self.mesh)
         keep_hf_weight_suffix_when_match = ['model']
