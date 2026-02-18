@@ -146,7 +146,6 @@ class Gemma3Attention(nnx.Module):
         # q: (T, N, H)
         q = self.q_proj(x)
         q = self.q_norm(q)
-        q = q * self.query_pre_attn_scalar ** -0.5
         q = apply_rope(q, positions=md.input_positions, head_dim=self.head_dim, rope_theta=self.rope_theta)
 
         # k: (T, K, H)
@@ -172,6 +171,77 @@ class Gemma3Attention(nnx.Module):
         o = self.o_proj(outputs)
 
         return new_kv_cache, o
+
+
+
+class Gemma3DecoderLayer(nnx.Module): 
+    def __init__(
+        self, 
+        config: GemmaConfig, 
+        dtype: jnp.dtype,
+        rng: nnx.Rngs,
+        mesh: Mesh, 
+        kv_cache_dtype: str,
+        is_local: bool = False
+    ):  
+        self.hidden_size = config.hidden_size 
+    
+        self.input_layer_norm = RMSNorm(
+            dim=self.hidden_size, 
+            config=config,
+            dtype=dtype
+        )
+        self.self_attn = Gemma3Attention(
+            config,
+            dtype, 
+            rng, 
+            mesh, 
+            kv_cache_dtype, 
+            is_local
+        )
+        self.post_attn_layer_norm = RMSNorm(
+            dim=self.hidden_size, 
+            config=config,
+            dtype=dtype
+        )
+        self.pre_feedforward_layernorm = RMSNorm(
+            dim=self.hidden_size, 
+            config=config,
+            dtype=dtype
+        )
+        self.mlp = Gemma3MLP(
+            config, 
+            dtype,
+            rng
+        )
+        self.post_feedforward_layernorm = RMSNorm(
+            dim=self.hidden_size, 
+            config=config,
+            dtype=dtype
+        )
+
+    def __call__(
+        self,
+        kv_cache: Optional[jax.Array],
+        x: jax.Array,
+        attention_metadata: AttentionMetadata 
+    ) -> Tuple[jax.Array, jax.Array]: 
+        x_norm = self.input_layer_norm(x)
+        kv_cache, attn_output = self.self_attn(
+            kv_cache,
+            x_norm, 
+            attention_metadata 
+        )
+        attn_output = self.post_attn_layer_norm(attn_output)
+        attn_output += x 
+
+        outputs = self.pre_feedforward_layernorm(attn_output)
+        outputs = self.mlp(outputs)
+        outputs = self.post_feedforward_layernorm(outputs)
+        outputs += attn_output 
+
+        return kv_cache, outputs 
+        
 
 
 class Gemma3Model(nnx.Module): 
