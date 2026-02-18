@@ -8,8 +8,7 @@ from vllm.config import VllmConfig
 from transformers import GemmaConfig 
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.models.jax.jax_intermediate_tensor import JaxIntermediateTensors
-from tpu_inference.layers.common.attention_interface import attention
+from tpu_inference.layers.common.attention_interface import sharded_ragged_paged_attention
 from tpu_inference.logger import init_logger
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
@@ -26,11 +25,11 @@ class RMSNorm(nnx.Module):
         dtype: jnp.dtype,
     ): 
         self.rms_norm_eps = config.rms_norm_eps 
-        self.weight = nnx.Param(jnp.ones(dim, dtype=dtype))
+        self.weight = nnx.Param(jnp.zeros(dim, dtype=dtype))
     
     def __call__(self, x: jax.Array) -> jax.Array: 
         rms = jnp.sqrt(jnp.mean(x ** 2, axis=-1, keepdims=True) + self.rms_norm_eps) 
-        return self.weight * (x / rms)
+        return (self.weight + 1) * (x / rms)
 
 class Gemma3MLP(nnx.Module): 
     def __init__(
@@ -148,7 +147,7 @@ class Gemma3Attention(nnx.Module):
         q = self.q_proj(x)
         q = self.q_norm(q)
         q = apply_rope(q, positions=md.input_positions, head_dim=self.head_dim, rope_theta=self.rope_theta)
-        q = q * self.query_pre_attn_scalar
+        q = q * (self.query_pre_attn_scalar ** -0.5)
 
         # k: (T, K, H)
         k = self.k_proj(x)
@@ -158,15 +157,23 @@ class Gemma3Attention(nnx.Module):
         # v: (T, K, H)
         v = self.v_proj(x)
 
-        new_kv_cache, outputs = attention(
-            kv_cache, 
+        # o: (T, N, H)
+        outputs, new_kv_cache = sharded_ragged_paged_attention(
+            self.mesh, 
             q, 
             k, 
             v, 
-            attention_metadata, 
-            self.mesh,
-            self.head_dim, 
-            attention_chunk_size=self.sliding_window
+            kv_cache,
+            md.seq_lens,
+            md.block_tables, 
+            md.query_start_loc,
+            md.request_distribution,
+            attention_sink=None,
+            sm_scale=1.0,
+            attention_chunk_size=self.sliding_window,
+            q_scale=None,
+            k_scale=None,
+            v_scale=None 
         )
 
         # o: (T, D)
@@ -275,7 +282,7 @@ class Gemma3Model(nnx.Module):
                 rng=rng,
                 mesh=mesh,
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype, 
-                is_local=i + 1 % self.sliding_window_pattern != 0,
+                is_local=(i + 1) % self.sliding_window_pattern != 0,
             ) for i in range(hf_config.num_hidden_layers)
         ]
         self.norm = RMSNorm(
@@ -291,6 +298,7 @@ class Gemma3Model(nnx.Module):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         x = self.embed(input_ids)
+        x *= jnp.sqrt(self.hidden_size).astype(x.dtype)
         
         for i, layer in enumerate(self.layers): 
             kv_cache = kv_caches[i]
