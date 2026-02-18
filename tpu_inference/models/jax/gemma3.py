@@ -25,10 +25,10 @@ class RMSNorm(nnx.Module):
         dtype: jnp.dtype,
     ): 
         self.rms_norm_eps = config.rms_norm_eps 
-        self.weight = nnx.Param(jnp.ones(dim, param_dtype=dtype))
+        self.weight = nnx.Param(jnp.ones(dim, dtype=dtype))
     
     def __call__(self, x: jax.Array) -> jax.Array: 
-        rms = jnp.sqrt(jnp.mean(x ** 2, axis=-1, keepdims=True) + self.eps) 
+        rms = jnp.sqrt(jnp.mean(x ** 2, axis=-1, keepdims=True) + self.rms_norm_eps) 
         return self.weight * (x / rms)
 
 class Gemma3MLP(nnx.Module): 
@@ -103,8 +103,8 @@ class Gemma3Attention(nnx.Module):
         self.query_pre_attn_scalar = config.query_pre_attn_scalar
         self.mesh = mesh 
 
-        self.q_norm = RMSNorm(dim=self.head_dim)
-        self.k_norm = RMSNorm(dim=self.head_dim)
+        self.q_norm = RMSNorm(dim=self.head_dim, config=config, dtype=dtype)
+        self.k_norm = RMSNorm(dim=self.head_dim, config=config, dtype=dtype)
 
         self.q_proj = nnx.Einsum(
             "TD,DNH->TNH", 
@@ -147,12 +147,12 @@ class Gemma3Attention(nnx.Module):
         q = self.q_proj(x)
         q = self.q_norm(q)
         q = q * self.query_pre_attn_scalar ** -0.5
-        q = apply_rope(q, positions=md.intput_positions, head_dim=self.head_dim, rope_theta=self.rope_theta)
+        q = apply_rope(q, positions=md.input_positions, head_dim=self.head_dim, rope_theta=self.rope_theta)
 
         # k: (T, K, H)
         k = self.k_proj(x)
         k = self.k_norm(k)
-        k = apply_rope(k, positions=md.intput_positions, head_dim=self.head_dim, rope_theta=self.rope_theta)
+        k = apply_rope(k, positions=md.input_positions, head_dim=self.head_dim, rope_theta=self.rope_theta)
 
         # v: (T, K, H)
         v = self.v_proj(x)
@@ -219,16 +219,4 @@ class Gemma3ForCausalLM(nnx.Module):
 
 # Playground :D
 if __name__ == '__main__': 
-    key = jax.random.key(42)
-    rng = nnx.Rngs(key)
-    cfg = GemmaConfig(
-        hidden_size=1152, 
-        intermidate_size=6912,
-    )
-    mlp = Gemma3MLP(
-        config=cfg,
-        dtype=jnp.bfloat16, 
-        rng=rng
-    )
-    res = mlp(jax.random.normal(jax.random.key(0), (2, 4, cfg.hidden_size)))
-    print(res)
+    pass
