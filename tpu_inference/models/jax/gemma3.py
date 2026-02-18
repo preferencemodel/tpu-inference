@@ -314,7 +314,8 @@ class Gemma3ForCausalLM(nnx.Module):
         rng: nnx.Rngs, 
         mesh: jax.sharding.Mesh
     ):
-        model_config = vllm_config.model_config
+        self.vllm_config = vllm_config
+        model_config = self.vllm_config.model_config
         hf_config = model_config.hf_config 
 
         self.vocab_size = model_config.get_vocab_size() 
@@ -342,12 +343,20 @@ class Gemma3ForCausalLM(nnx.Module):
         return kv_caches, x, []
     
     def load_weights(self, rng_key: jax.Array): 
-        pass 
-    
+        mappings = {}  
+
+        loader = self.WeightLoader(self.vllm_config, self.mesh)
+        keep_hf_weight_suffix_when_match = ['model']
+        loader.load_weights(
+            self, 
+            mappings, 
+            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match
+        ) 
+
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return hidden_states @ self.model.embed.embedding.T
 
 
 # Playground :D
-if __name__ == '__main__': 
-    pass
+if __name__ == '__main__':
+    pass 
