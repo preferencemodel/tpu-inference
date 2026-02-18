@@ -263,7 +263,7 @@ class Gemma3Model(nnx.Module):
         self.embed = nnx.Embed(
             num_embeddings=self.vocab_size, 
             features=self.hidden_size, 
-            param_dype=self.dtype,
+            param_dtype=self.dtype,
             embedding_init=init_fn,
             rngs=rng
         ) 
