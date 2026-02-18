@@ -12,6 +12,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import JaxIntermediateTens
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.logger import init_logger
 from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
 
 logger = init_logger(__name__)
 
@@ -281,26 +282,14 @@ class Gemma3Model(nnx.Module):
             hf_config,
             self.dtype
         )
-        self.lm_head = nnx.Linear(
-            in_features=self.hidden_size,
-            out_features=self.vocab_size, 
-            use_bias=False, 
-            param_dtype=self.dtype,
-            kernel_init=init_fn, 
-            rngs=rng 
-        )
     
     def __call__(
         self,
         kv_caches: List[jax.Array],
         input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
-        inputs_embeds: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array]:
-        if inputs_embeds is not None: 
-            x = inputs_embeds
-        else: 
-            x = self.embed(input_ids)
+        x = self.embed(input_ids)
         
         for i, layer in enumerate(self.layers): 
             kv_cache = kv_caches[i]
@@ -317,14 +306,35 @@ class Gemma3Model(nnx.Module):
 
 
 class Gemma3ForCausalLM(nnx.Module):
+    WeightLoader = StandardWeightLoader
+
     def __init__(
         self, 
         vllm_config: VllmConfig, 
         rng: nnx.Rngs, 
         mesh: jax.sharding.Mesh
     ):
-        pass 
+        model_config = vllm_config.model_config
+        hf_config = model_config.hf_config 
+
+        self.vocab_size = model_config.get_vocab_size() 
+        self.dtype = model_config.dtype 
+        self.hidden_size = hf_config.hidden_size 
     
+        self.model = Gemma3Model(
+            vllm_config,
+            rng,
+            mesh
+        )
+        self.lm_head = nnx.Linear(
+            in_features=self.hidden_size,
+            out_features=self.vocab_size, 
+            use_bias=False, 
+            param_dtype=self.dtype,
+            kernel_init=init_fn, 
+            rngs=rng 
+        )
+            
     def __call__(
         self,
         kv_caches: List[jax.Array],
@@ -332,13 +342,18 @@ class Gemma3ForCausalLM(nnx.Module):
         attention_metadata: AttentionMetadata,
         *args,   
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
-        pass 
+        kv_caches, x = self.model(
+            kv_caches,
+            input_ids,
+            attention_metadata
+        )
+        return kv_caches, x, []
     
     def load_weights(self, rng_key: jax.Array): 
         pass 
     
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        pass 
+        return self.lm_head(hidden_states)
 
 
 # Playground :D
