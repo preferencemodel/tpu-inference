@@ -46,7 +46,7 @@ class Gemma3MLP(nnx.Module):
             out_features=self.intermediate_size, 
             use_bias=False, 
             param_dtype=dtype,
-            kernel_init=init_fn,
+            kernel_init=nnx.with_partitioning(init_fn, (None, 'model')),
             rngs=rng 
         )
         self.up_proj = nnx.Linear(
@@ -54,7 +54,7 @@ class Gemma3MLP(nnx.Module):
             out_features=self.intermediate_size, 
             use_bias=False, 
             param_dtype=dtype,
-            kernel_init=init_fn, 
+            kernel_init=nnx.with_partitioning(init_fn, (None, 'model')), 
             rngs=rng 
         )
         self.down_proj = nnx.Linear(
@@ -62,7 +62,7 @@ class Gemma3MLP(nnx.Module):
             out_features=self.hidden_size, 
             use_bias=False, 
             param_dtype=dtype,
-            kernel_init=init_fn,            
+            kernel_init=nnx.with_partitioning(init_fn, ('model', None)),          
             rngs=rng 
         )
         self.act_fn = {'gelu_pytorch_tanh': lambda x: jax.nn.gelu(x, approximate=True)}[self.hidden_act]
@@ -110,28 +110,28 @@ class Gemma3Attention(nnx.Module):
             "TD,DNH->TNH", 
             (self.hidden_size, self.num_heads, self.head_dim),
             param_dtype=dtype, 
-            kernel_init=init_fn,
+            kernel_init=nnx.with_partitioning(init_fn, (None, 'model', None)), 
             rngs=rng 
         )
         self.k_proj = nnx.Einsum(
             "TD,DKH->TKH", 
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype, 
-            kernel_init=init_fn,
+            kernel_init=nnx.with_partitioning(init_fn, (None, 'model', None)),
             rngs=rng 
         ) 
         self.v_proj = nnx.Einsum(
             "TD,DKH->TKH", 
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype, 
-            kernel_init=init_fn,
+            kernel_init=nnx.with_partitioning(init_fn, (None, 'model', None)),
             rngs=rng 
         )
         self.o_proj = nnx.Einsum(
             "TNH,NHD->TD", 
             (self.num_heads, self.head_dim, self.hidden_size),
             param_dtype=dtype, 
-            kernel_init=init_fn,
+            kernel_init=nnx.with_partitioning(init_fn, ('model', None, None)),
             rngs=rng 
         )
 
@@ -272,7 +272,7 @@ class Gemma3Model(nnx.Module):
             num_embeddings=self.vocab_size, 
             features=self.hidden_size, 
             param_dtype=self.dtype,
-            embedding_init=init_fn,
+            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng
         ) 
         self.layers = [
