@@ -7,6 +7,7 @@ from flax import nnx
 from vllm.config import VllmConfig
 from transformers import GemmaConfig 
 
+from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.attention_interface import sharded_ragged_paged_attention
 from tpu_inference.logger import init_logger
@@ -102,6 +103,8 @@ class Gemma3Attention(nnx.Module):
         self.sliding_window = None if not is_local else config.sliding_window 
         self.query_pre_attn_scalar = config.query_pre_attn_scalar
         self.mesh = mesh 
+        self.num_heads = utils.get_padded_num_heads(self.num_heads, self.mesh.shape["model"])
+        self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads, self.mesh.shape["model"])
 
         self.q_norm = RMSNorm(dim=self.head_dim, config=config, dtype=dtype)
         self.k_norm = RMSNorm(dim=self.head_dim, config=config, dtype=dtype)
