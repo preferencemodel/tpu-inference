@@ -132,3 +132,60 @@ class SiglipSdpaAttention(nnx.Module):
         o = self.o_proj(o)
 
         return o 
+
+class SiglipEncoder(nnx.Module): 
+    def __init__(
+        self, 
+        config: SiglipVisionConfig,
+        dtype: jnp.dtype, 
+        rng: nnx.Rngs, 
+        mesh: Mesh
+    ):
+        self.hidden_size = config.hidden_size
+
+        self.self_attn = SiglipSdpaAttention(
+            config, 
+            dtype,
+            rng, 
+            mesh 
+        )
+        self.mlp = SiglipMLP(
+            config, 
+            dtype,
+            rng 
+        )
+        self.layer_norm1 = nnx.LayerNorm(
+            num_features=self.hidden_size, 
+            epsilon=1e-06, 
+            param_dtype=dtype, 
+            rngs=rng,
+            use_bias=True,
+            kernel_init=init_fn, 
+        )
+        self.layer_norm2 = nnx.LayerNorm(
+            num_features=self.hidden_size, 
+            epsilon=1e-06, 
+            param_dtype=dtype, 
+            rngs=rng,
+            use_bias=True,
+            kernel_init=init_fn, 
+        )
+    
+    def __call__(
+        self,
+        x: jax.Array     
+    ) -> jax.Array:  
+        residual = x 
+        x = self.layer_norm1(x)
+        x = self.self_attn(x)
+        x += residual 
+
+        residual = x 
+        x = self.layer_norm2(x)
+        x = self.mlp(x)
+        x += residual 
+
+        return x 
+
+class SiglipModel(nnx.Module): 
+    pass 
