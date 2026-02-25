@@ -9,9 +9,10 @@ from transformers import GemmaConfig
 
 from tpu_inference.logger import init_logger
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
+from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader, MetadataMap, get_default_maps, load_hf_weights
 from tpu_inference.models.jax.gemma3 import Gemma3Model, RMSNorm
-from tpu_inference.models.jax.utils.multi_modal_utils import MultiModalEmbeddings, merge_multimodal_embeddings
+from tpu_inference.models.jax.siglip import SiglipVisionTransformer
+from tpu_inference.models.jax.utils.multi_modal_utils import MultiModalEmbeddings
 
 logger = init_logger(__name__)
 
@@ -41,7 +42,8 @@ class Gemma3MultiModalProjector(nnx.Module):
             out_features=self.text_hidden_size,  
             param_dtype=self.dtype,
             kernel_init=init_fn, 
-            rngs=rng 
+            rngs=rng, 
+            use_bias=False
         )
         
 
@@ -70,6 +72,9 @@ class Gemma3ForConditionalGeneration(nnx.Module):
         self.vocab_size = self.model_config.get_vocab_size() 
         self.dtype = self.model_config.dtype 
         self.hidden_size = self.model_config.hf_text_config.hidden_size 
+        self.num_heads = self.model_config.hf_text_config.num_attention_heads
+        self.num_kv_heads = self.model_config.hf_text_config.num_key_value_heads
+        self.head_dim = self.model_config.hf_text_config.head_dim 
 
         self.multi_modal_projector = Gemma3MultiModalProjector(
             self.vllm_config,
@@ -79,6 +84,12 @@ class Gemma3ForConditionalGeneration(nnx.Module):
             self._preproc_hf_config_for_text_model(self.vllm_config),
             self.rng,
             self.mesh
+        )
+        self.vision_model = SiglipVisionTransformer(
+            self.vllm_config.model_config.hf_config.vision_config, 
+            self.dtype,
+            self.rng,
+            self.mesh, 
         )
 
     def _preproc_hf_config_for_text_model(self, vllm_config: VllmConfig) -> VllmConfig: 
@@ -141,16 +152,15 @@ class Gemma3ForConditionalGeneration(nnx.Module):
         return vision_embeddings
 
 
-    def load_weights(self, rng_key: jax.Array): 
-        # NOTE: Since we are using nnx.eval_shape to init the model,
-        # we have to pass dynamic arrays here for __call__'s usage.
+    def load_weights(self, rng_key: jax.Array):
         self.rng = nnx.Rngs(rng_key)
 
-        # Key: path to a HF layer weight
-        # Value: path to a nnx layer weight
-        mappings = {
-            "multi_modal_projector.mm_input_projection_weight": "multi_modal_projector.mm_input_projection.kernel", 
-            "multi_modal_projector.mm_soft_emb_norm.weight": "multi_modal_projector.mm_soft_emb_norm.weight", 
+        # 1. Load language model + projector weights
+        lang_mappings = {
+            # multi-modal projector
+            "multi_modal_projector.mm_input_projection_weight": "multi_modal_projector.mm_input_projection.kernel",
+            "multi_modal_projector.mm_soft_emb_norm.weight": "multi_modal_projector.mm_soft_emb_norm.weight",
+            # language model
             "language_model.model.embed_tokens.weight": "model.embed.embedding",
             "language_model.model.layers.*.mlp.down_proj.weight": "model.layers.*.mlp.down_proj.kernel",
             "language_model.model.layers.*.mlp.gate_proj.weight": "model.layers.*.mlp.gate_proj.kernel",
@@ -167,16 +177,68 @@ class Gemma3ForConditionalGeneration(nnx.Module):
             "language_model.model.layers.*.self_attn.k_norm.weight": "model.layers.*.self_attn.k_norm.weight",
             "language_model.model.norm.weight": "model.norm.weight",
         }
-        
-        loader = self.WeightLoader(
-            self._preproc_hf_config_for_weight_loading(self.vllm_config), 
-            self.mesh
+        lang_metadata = get_default_maps(
+            self._preproc_hf_config_for_weight_loading(self.vllm_config).model_config,
+            self.mesh,
+            lang_mappings
         )
-        loader.load_weights(
-            self, 
-            mappings, 
-            keep_hf_weight_suffix_when_match=['language_model', 'multi_modal_projector']
-        ) 
+        load_hf_weights(
+            vllm_config=self._preproc_hf_config_for_weight_loading(self.vllm_config),
+            model=self,
+            metadata_map=lang_metadata,
+            mesh=self.mesh,
+            filter_regex=r"^(language_model|multi_modal_projector)\.",
+            keep_hf_weight_suffix_when_match=['language_model', 'multi_modal_projector'],
+        )
+
+        # 2. Load vision encoder weights
+        vision_mappings = {
+            # embeddings
+            "vision_tower.vision_model.embeddings.patch_embedding.weight": "vision_model.embeddings.patch_embedding.kernel",
+            "vision_tower.vision_model.embeddings.patch_embedding.bias": "vision_model.embeddings.patch_embedding.bias",
+            "vision_tower.vision_model.embeddings.position_embedding.weight": "vision_model.embeddings.position_embedding.embedding",
+            # transformer layers
+            "vision_tower.vision_model.encoder.layers.*.layer_norm1.weight": "vision_model.encoder.layers.*.layer_norm1.scale",
+            "vision_tower.vision_model.encoder.layers.*.layer_norm1.bias": "vision_model.encoder.layers.*.layer_norm1.bias",
+            "vision_tower.vision_model.encoder.layers.*.layer_norm2.weight": "vision_model.encoder.layers.*.layer_norm2.scale",
+            "vision_tower.vision_model.encoder.layers.*.layer_norm2.bias": "vision_model.encoder.layers.*.layer_norm2.bias",
+            "vision_tower.vision_model.encoder.layers.*.self_attn.q_proj.weight": "vision_model.encoder.layers.*.self_attn.q_proj.kernel",
+            "vision_tower.vision_model.encoder.layers.*.self_attn.q_proj.bias": "vision_model.encoder.layers.*.self_attn.q_proj.bias",
+            "vision_tower.vision_model.encoder.layers.*.self_attn.k_proj.weight": "vision_model.encoder.layers.*.self_attn.k_proj.kernel",
+            "vision_tower.vision_model.encoder.layers.*.self_attn.k_proj.bias": "vision_model.encoder.layers.*.self_attn.k_proj.bias",
+            "vision_tower.vision_model.encoder.layers.*.self_attn.v_proj.weight": "vision_model.encoder.layers.*.self_attn.v_proj.kernel",
+            "vision_tower.vision_model.encoder.layers.*.self_attn.v_proj.bias": "vision_model.encoder.layers.*.self_attn.v_proj.bias",
+            "vision_tower.vision_model.encoder.layers.*.self_attn.out_proj.weight": "vision_model.encoder.layers.*.self_attn.out_proj.kernel",
+            "vision_tower.vision_model.encoder.layers.*.self_attn.out_proj.bias": "vision_model.encoder.layers.*.self_attn.out_proj.bias",
+            "vision_tower.vision_model.encoder.layers.*.mlp.fc1.weight": "vision_model.encoder.layers.*.mlp.fc1.kernel",
+            "vision_tower.vision_model.encoder.layers.*.mlp.fc1.bias": "vision_model.encoder.layers.*.mlp.fc1.bias",
+            "vision_tower.vision_model.encoder.layers.*.mlp.fc2.weight": "vision_model.encoder.layers.*.mlp.fc2.kernel",
+            "vision_tower.vision_model.encoder.layers.*.mlp.fc2.bias": "vision_model.encoder.layers.*.mlp.fc2.bias",
+            # post layernorm
+            "vision_tower.vision_model.post_layernorm.weight": "vision_model.post_layernorm.scale",
+            "vision_tower.vision_model.post_layernorm.bias": "vision_model.post_layernorm.bias",
+        }
+        vision_metadata = MetadataMap(
+            name_map=vision_mappings,
+            transpose_map={
+                'patch_embedding.weight': (2, 3, 1, 0),
+                'q_proj': (1, 0),
+                'k_proj': (1, 0),
+                'v_proj': (1, 0),
+                'out_proj': (1, 0),
+                'fc1': (1, 0),
+                'fc2': (1, 0),
+            },
+        )
+
+        load_hf_weights(
+            vllm_config=self._preproc_hf_config_for_weight_loading(self.vllm_config),
+            model=self,
+            metadata_map=vision_metadata,
+            mesh=self.mesh,
+            filter_regex=r"^vision_tower\.",
+            keep_hf_weight_suffix_when_match=['vision_tower'],
+        )
 
     def precompile_vision_encoder(
         self,

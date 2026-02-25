@@ -392,26 +392,6 @@ class Gemma3ForCausalLM(nnx.Module):
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return hidden_states @ self.model.embed.embedding.T
 
-
-class Gemma3ForConditionalLM(nnx.Module): 
-    def __init__(
-        self, 
-        vllm_config: VllmConfig, 
-        rng: nnx.Rngs, 
-        mesh: jax.sharding.Mesh
-    ):
-        pass 
-    
-    def __call__(
-        self,
-        kv_caches: List[jax.Array],
-        input_ids: jax.Array,
-        attention_metadata: AttentionMetadata,
-        *args,   
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
-        pass 
-    
-
 # Playground :D
 if __name__ == '__main__':
     pass 

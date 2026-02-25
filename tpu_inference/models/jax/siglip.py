@@ -238,7 +238,8 @@ class SiglipVisionEmbeddings(nnx.Module):
         self.hidden_size = config.hidden_size 
         
         self.patch_embedding = nnx.Conv(
-            features=self.hidden_size,
+            in_features=3, 
+            out_features=self.hidden_size,
             kernel_size=(self.patch_size, self.patch_size), 
             strides=(self.patch_size, self.patch_size), 
             padding='VALID', 
