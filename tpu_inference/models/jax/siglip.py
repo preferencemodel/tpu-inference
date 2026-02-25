@@ -107,6 +107,7 @@ class SiglipSdpaAttention(nnx.Module):
         self,
         x: jax.Array     
     ) -> jax.Array:  
+        # TODO most likely completely rework 
         T, B, D = x.shape 
         # [T, B, D]
         q = self.q_proj(x)
@@ -188,19 +189,57 @@ class SiglipEncoder(nnx.Module):
         return x 
 
 class SiglipVisionEmbeddings(nnx.Module): 
+    """
+    B - batch size; 
+    H - img height (896); 
+    W - img width (896); 
+    C - channels (3);
+    Gh - grid height (H // patch_size = 64); 
+    Gw - grid width (W // patch_size = 64); 
+    N - num patches (Gh * Gw = 4096);
+    D - hidden size (1152); 
+    """
     def __init__(
         self, 
         config: SiglipVisionConfig,
         dtype: jnp.dtype, 
         rng: nnx.Rngs
-    ):
-        pass 
+    ):  
+        self.image_size = config.image_size 
+        self.patch_size = config.patch_size 
+        self.num_patches = (self.image_size // self.patch_size) ** 2 
+        self.hidden_size = config.hidden_size 
+        
+        self.patch_embedding = nnx.Conv(
+            out_features=self.hidden_size,
+            kernel_size=(self.patch_size, self.patch_size), 
+            strides=(self.patch_size, self.patch_size), 
+            padding='VALID', 
+            param_dtype=dtype,
+            kernel_init=init_fn,
+            rngs=rng,
+        )
+        self.position_embedding = nnx.Embed(
+            num_embeddings=self.num_patches,
+            features=self.hidden_size, 
+            param_dtype=dtype, 
+            rngs=rng,
+        )
 
     def __call__(
         self,
         x: jax.Array     
     ) -> jax.Array:  
-        pass 
+        # (B, H, W, C) -> (B, Gh, Gw, D)
+        x = self.patch_embedding(x)
+        B, Gh, Gw, D = x.shape 
+        # (B, Gh, Gw, D) -> (B, N, D)
+        x = jnp.reshape(x, (B, Gh * Gw, D))
+        # (N,) position indices
+        pos_ids = jnp.arange(Gh * Gw)
+        # (B, N, D) + (N, D) -> (B, N, D)
+        x = x + self.position_embedding(pos_ids)
+        return x
     
 class SiglipVisionTransformer(nnx.Module): 
     def __init__(
