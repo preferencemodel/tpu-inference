@@ -47,10 +47,10 @@ class SiglipMLP(nnx.Module):
 
 class SiglipSdpaAttention(nnx.Module): 
     """
-    B - batch. size; 
-    T - seq. length; 
+    B - batch size; 
+    T - seq length; 
     D - hidden size; 
-    H - head dim.;
+    H - head dim;
     N - num heads;
     """
     def __init__(
@@ -88,7 +88,7 @@ class SiglipSdpaAttention(nnx.Module):
             param_dtype=dtype,
             rngs=rng 
         ) 
-        self.o_proj = nnx.Linear(
+        self.out_proj = nnx.Linear(
             in_features=self.hidden_size, 
             out_features=self.hidden_size, 
             use_bias=True, 
@@ -107,32 +107,31 @@ class SiglipSdpaAttention(nnx.Module):
         self,
         x: jax.Array     
     ) -> jax.Array:  
-        # TODO most likely completely rework 
-        T, B, D = x.shape 
-        # [T, B, D]
+        B, T, D = x.shape 
+
         q = self.q_proj(x)
-        # [T, B, D] -> [T, B, N, H]
-        q = q.reshape(T, B, self.num_attention_heads, self.head_dim) 
+        # (B, T, D) -> (B, T, N, H)
+        q = q.reshape(B, T, self.num_attention_heads, self.head_dim) 
         k = self.k_proj(x)
-        k = k.reshape(T, B, self.num_attention_heads, self.head_dim) 
+        k = k.reshape(B, T, self.num_attention_heads, self.head_dim) 
         v = self.v_proj(x)
-        v = v.reshape(T, B, self.num_attention_heads, self.head_dim) 
+        v = v.reshape(B, T, self.num_attention_heads, self.head_dim) 
 
-        # transpose for shapes vllm's flash attention expects 
-        # [T, B, N, H] -> [B, N, T, H]
-        q = jnp.transpose(q, (1, 2, 0, 3))
-        k = jnp.transpose(k, (1, 2, 0, 3))
-        v = jnp.transpose(v, (1, 2, 0, 3))
+        # (B, T, N, H) -> (B, N, T, H)
+        q = jnp.transpose(q, (0, 2, 1, 3))
+        k = jnp.transpose(k, (0, 2, 1, 3))
+        v = jnp.transpose(v, (0, 2, 1, 3))
 
-        # attention 
-        # 3 * [B, N, T, H] -> [B, N, T, H]
+        # 3 * (B, N, T, H) -> (B, N, T, H)
         o = self.flash_attention(q, k, v)
-        # [B, N, T, H] -> [T, B, N, H]
-        o = o.transpose(2, 0, 1, 3)
-        o = o.reshape(T, B, D)
-        o = self.o_proj(o)
+        # (B, N, T, H) -> (B, T, N, H)
+        o = jnp.transpose(o, (0, 2, 1, 3))
+        # (B, T, N, H) -> (B, T, D)
+        o = o.reshape(B, T, D)
+        o = self.out_proj(o)
 
         return o 
+
 
 class SiglipBlock(nnx.Module): 
     def __init__(
@@ -161,7 +160,6 @@ class SiglipBlock(nnx.Module):
             param_dtype=dtype, 
             rngs=rng,
             use_bias=True,
-            kernel_init=init_fn, 
         )
         self.layer_norm2 = nnx.LayerNorm(
             num_features=self.hidden_size, 
@@ -169,7 +167,6 @@ class SiglipBlock(nnx.Module):
             param_dtype=dtype, 
             rngs=rng,
             use_bias=True,
-            kernel_init=init_fn, 
         )
     
     def __call__(
@@ -188,6 +185,7 @@ class SiglipBlock(nnx.Module):
 
         return x 
 
+
 class SiglipEncoder(nnx.Module): 
     def __init__(
         self, 
@@ -198,22 +196,14 @@ class SiglipEncoder(nnx.Module):
     ):
         self.num_hidden_layers = config.num_hidden_layers
         
-        self.layers = nnx.List([
+        self.layers = [
             SiglipBlock(
                 config,
                 dtype,
                 rng,
                 mesh 
             ) for _ in range(self.num_hidden_layers)
-        ])
-        self.post_layernorm = nnx.LayerNorm(
-            num_features=self.hidden_size, 
-            epsilon=1e-06, 
-            param_dtype=dtype, 
-            rngs=rng,
-            use_bias=True,
-            kernel_init=init_fn, 
-        )
+        ]
 
     def __call__(
         self,
@@ -222,9 +212,8 @@ class SiglipEncoder(nnx.Module):
         for layer in self.layers:
             x = layer(x) 
 
-        x = self.post_layernorm(x)
-
         return x 
+
 
 class SiglipVisionEmbeddings(nnx.Module): 
     """
@@ -249,7 +238,7 @@ class SiglipVisionEmbeddings(nnx.Module):
         self.hidden_size = config.hidden_size 
         
         self.patch_embedding = nnx.Conv(
-            out_features=self.hidden_size,
+            features=self.hidden_size,
             kernel_size=(self.patch_size, self.patch_size), 
             strides=(self.patch_size, self.patch_size), 
             padding='VALID', 
@@ -278,8 +267,9 @@ class SiglipVisionEmbeddings(nnx.Module):
         # (B, N, D) + (N, D) -> (B, N, D)
         x = x + self.position_embedding(pos_ids)
         return x
+
     
-class SiglipVisionModel(nnx.Module): 
+class SiglipVisionTransformer(nnx.Module): 
     def __init__(
         self, 
         config: SiglipVisionConfig,
@@ -287,7 +277,9 @@ class SiglipVisionModel(nnx.Module):
         rng: nnx.Rngs, 
         mesh: Mesh
     ):
-        self.embbedings = SiglipVisionEmbeddings(
+        self.hidden_size = config.hidden_size
+
+        self.embeddings = SiglipVisionEmbeddings(
             config,
             dtype, 
             rng 
@@ -298,11 +290,23 @@ class SiglipVisionModel(nnx.Module):
             rng,
             mesh
         )
+        self.post_layernorm = nnx.LayerNorm(
+            num_features=self.hidden_size, 
+            epsilon=1e-06, 
+            param_dtype=dtype, 
+            rngs=rng,
+            use_bias=True,
+        )
 
     def __call__(
         self,
         x: jax.Array     
     ) -> jax.Array:  
         # (B, H, W, C) -> (B, N, D)
-        x = self.embbedings(x)
-        return self.encoder(x)
+        x = self.embeddings(x)
+        # (B, N, D) -> (B, N, D)
+        x = self.encoder(x)
+        # (B, N, D) -> (B, N, D)
+        x = self.post_layernorm(x)
+        return x
+    
