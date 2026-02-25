@@ -123,7 +123,7 @@ class SiglipSdpaAttention(nnx.Module):
         v = jnp.transpose(v, (0, 2, 1, 3))
 
         # 3 * (B, N, T, H) -> (B, N, T, H)
-        o = self.flash_attention(q, k, v)
+        o = self.flash_attention(q, k, v, None)
         # (B, N, T, H) -> (B, T, N, H)
         o = jnp.transpose(o, (0, 2, 1, 3))
         # (B, T, N, H) -> (B, T, D)
@@ -235,10 +235,11 @@ class SiglipVisionEmbeddings(nnx.Module):
         self.image_size = config.image_size 
         self.patch_size = config.patch_size 
         self.num_patches = (self.image_size // self.patch_size) ** 2 
+        self.num_channels = config.num_channels 
         self.hidden_size = config.hidden_size 
         
         self.patch_embedding = nnx.Conv(
-            in_features=3, 
+            in_features=self.num_channels, 
             out_features=self.hidden_size,
             kernel_size=(self.patch_size, self.patch_size), 
             strides=(self.patch_size, self.patch_size), 
@@ -299,6 +300,7 @@ class SiglipVisionTransformer(nnx.Module):
             use_bias=True,
         )
 
+    @nnx.jit
     def __call__(
         self,
         x: jax.Array     

@@ -299,8 +299,13 @@ class Gemma3Model(nnx.Module):
         kv_caches: List[jax.Array],
         input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array]:
-        x = self.embed(input_ids)
+        if inputs_embeds is not None: 
+            x = inputs_embeds
+        else: 
+            x = self.embed(input_ids)
+
         x *= jnp.sqrt(self.hidden_size).astype(x.dtype)
         
         for i, layer in enumerate(self.layers): 
@@ -347,12 +352,14 @@ class Gemma3ForCausalLM(nnx.Module):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
         *args,   
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         kv_caches, x = self.model(
             kv_caches,
             input_ids,
-            attention_metadata
+            attention_metadata, 
+            inputs_embeds
         )
         return kv_caches, x, []
     

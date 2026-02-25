@@ -111,12 +111,14 @@ class Gemma3ForConditionalGeneration(nnx.Module):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
         *args,   
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         kv_caches, x = self.model(
             kv_caches,
             input_ids,
-            attention_metadata
+            attention_metadata, 
+            inputs_embeds
         )
         return kv_caches, x, []
     
@@ -151,6 +153,13 @@ class Gemma3ForConditionalGeneration(nnx.Module):
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
+    def embed_input_ids(
+        self, 
+        input_ids: Optional[jax.Array],
+        multimodal_embeddings: Optional[jax.Array]
+    ) -> jax.Array:
+        input_embeds = self.model.embed(input_ids)
+        return input_embeds  
 
     def load_weights(self, rng_key: jax.Array):
         self.rng = nnx.Rngs(rng_key)
@@ -244,5 +253,11 @@ class Gemma3ForConditionalGeneration(nnx.Module):
         self,
         run_compilation_fn: Callable,
     ) -> None: 
-        pass 
+        # image is resized to 896 always 
+        dummy = jnp.ones((1, 896, 896, 3), dtype=self.vllm_config.model_config.dtype)
+        run_compilation_fn(
+            "vision_encoder", 
+            self.vision_model.__call__, 
+            dummy
+        )
     
