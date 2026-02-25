@@ -134,7 +134,7 @@ class SiglipSdpaAttention(nnx.Module):
 
         return o 
 
-class SiglipEncoder(nnx.Module): 
+class SiglipBlock(nnx.Module): 
     def __init__(
         self, 
         config: SiglipVisionConfig,
@@ -185,6 +185,44 @@ class SiglipEncoder(nnx.Module):
         x = self.layer_norm2(x)
         x = self.mlp(x)
         x += residual 
+
+        return x 
+
+class SiglipEncoder(nnx.Module): 
+    def __init__(
+        self, 
+        config: SiglipVisionConfig,
+        dtype: jnp.dtype, 
+        rng: nnx.Rngs, 
+        mesh: Mesh
+    ):
+        self.num_hidden_layers = config.num_hidden_layers
+        
+        self.layers = nnx.List([
+            SiglipBlock(
+                config,
+                dtype,
+                rng,
+                mesh 
+            ) for _ in range(self.num_hidden_layers)
+        ])
+        self.post_layernorm = nnx.LayerNorm(
+            num_features=self.hidden_size, 
+            epsilon=1e-06, 
+            param_dtype=dtype, 
+            rngs=rng,
+            use_bias=True,
+            kernel_init=init_fn, 
+        )
+
+    def __call__(
+        self,
+        x: jax.Array     
+    ) -> jax.Array:  
+        for layer in self.layers:
+            x = layer(x) 
+
+        x = self.post_layernorm(x)
 
         return x 
 
@@ -241,7 +279,7 @@ class SiglipVisionEmbeddings(nnx.Module):
         x = x + self.position_embedding(pos_ids)
         return x
     
-class SiglipVisionTransformer(nnx.Module): 
+class SiglipVisionModel(nnx.Module): 
     def __init__(
         self, 
         config: SiglipVisionConfig,
@@ -249,27 +287,22 @@ class SiglipVisionTransformer(nnx.Module):
         rng: nnx.Rngs, 
         mesh: Mesh
     ):
-        pass 
+        self.embbedings = SiglipVisionEmbeddings(
+            config,
+            dtype, 
+            rng 
+        )
+        self.encoder = SiglipEncoder(
+            config,
+            dtype, 
+            rng,
+            mesh
+        )
 
     def __call__(
         self,
         x: jax.Array     
     ) -> jax.Array:  
-        pass 
-    
-
-class SiglipModel(nnx.Module): 
-    def __init__(
-        self, 
-        config: SiglipVisionConfig,
-        dtype: jnp.dtype, 
-        rng: nnx.Rngs, 
-        mesh: Mesh
-    ):
-        pass 
-
-    def __call__(
-        self,
-        x: jax.Array     
-    ) -> jax.Array:  
-        ... 
+        # (B, H, W, C) -> (B, N, D)
+        x = self.embbedings(x)
+        return self.encoder(x)
