@@ -2,19 +2,56 @@ from copy import deepcopy
 from typing import TypedDict, List, Tuple, Optional, Callable
 
 import jax 
+import jax.numpy as jnp 
 from flax import nnx 
 from vllm.config import VllmConfig
+from transformers import GemmaConfig
 
 from tpu_inference.logger import init_logger
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
-from tpu_inference.models.jax.gemma3 import Gemma3Model
+from tpu_inference.models.jax.gemma3 import Gemma3Model, RMSNorm
 from tpu_inference.models.jax.utils.multi_modal_utils import MultiModalEmbeddings, merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
+init_fn = nnx.initializers.uniform()
+
 class Gemma3ImagePixelInputs(TypedDict): 
     pass
+
+class Gemma3MultiModalProjector(nnx.Module): 
+    def __init__(
+        self,
+        config: VllmConfig,
+        rng: nnx.Rngs, 
+    ): 
+        hf_config = config.model_config.hf_config
+        self.vision_hidden_size = hf_config.vision_config.hidden_size 
+        self.text_hidden_size = hf_config.text_config.hidden_size 
+        self.dtype = config.model_config.dtype  
+
+        self.mm_soft_emb_norm = RMSNorm(
+            dim=self.vision_hidden_size,
+            config=config.model_config.hf_config.text_config, 
+            dtype=self.dtype
+        )
+        self.mm_input_projection = nnx.Linear(
+            in_features=self.vision_hidden_size, 
+            out_features=self.text_hidden_size,  
+            param_dtype=self.dtype,
+            kernel_init=init_fn, 
+            rngs=rng 
+        )
+        
+
+    def __call__(
+        self, 
+        x: jax.Array
+    ) -> jax.Array: 
+        x  = self.mm_soft_emb_norm(x)
+        x = self.mm_input_projection(x)
+        return x  
 
 class Gemma3ForConditionalGeneration(nnx.Module): 
     WeightLoader = StandardWeightLoader
@@ -33,7 +70,11 @@ class Gemma3ForConditionalGeneration(nnx.Module):
         self.vocab_size = self.model_config.get_vocab_size() 
         self.dtype = self.model_config.dtype 
         self.hidden_size = self.model_config.hf_text_config.hidden_size 
-    
+
+        self.multi_modal_projector = Gemma3MultiModalProjector(
+            self.vllm_config,
+            self.rng
+        )
         self.model = Gemma3Model(
             self._preproc_hf_config_for_text_model(self.vllm_config),
             self.rng,
@@ -108,6 +149,8 @@ class Gemma3ForConditionalGeneration(nnx.Module):
         # Key: path to a HF layer weight
         # Value: path to a nnx layer weight
         mappings = {
+            "multi_modal_projector.mm_input_projection_weight": "multi_modal_projector.mm_input_projection.kernel", 
+            "multi_modal_projector.mm_soft_emb_norm.weight": "multi_modal_projector.mm_soft_emb_norm.weight", 
             "language_model.model.embed_tokens.weight": "model.embed.embedding",
             "language_model.model.layers.*.mlp.down_proj.weight": "model.layers.*.mlp.down_proj.kernel",
             "language_model.model.layers.*.mlp.gate_proj.weight": "model.layers.*.mlp.gate_proj.kernel",
@@ -132,7 +175,7 @@ class Gemma3ForConditionalGeneration(nnx.Module):
         loader.load_weights(
             self, 
             mappings, 
-            keep_hf_weight_suffix_when_match=['language_model']
+            keep_hf_weight_suffix_when_match=['language_model', 'multi_modal_projector']
         ) 
 
     def precompile_vision_encoder(
