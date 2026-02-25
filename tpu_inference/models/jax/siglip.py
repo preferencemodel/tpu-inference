@@ -7,7 +7,7 @@ from transformers.models.siglip.configuration_siglip import SiglipVisionConfig
 
 from tpu_inference.layers.common.attention_interface import sharded_flash_attention
 
-init_fn = nnx.initializers.uniform()
+init_fn = nnx.initializers.uniform()    
 
 class SiglipMLP(nnx.Module): 
     def __init__(
@@ -40,9 +40,9 @@ class SiglipMLP(nnx.Module):
         self,
         x: jax.Array     
     ) -> jax.Array:  
-        fc1 = self.act_fn(self.fc1(x))
-        fc2 = self.fc2(fc1)         
-        return fc2 
+        x = self.act_fn(self.fc1(x))
+        x = self.fc2(x)         
+        return x 
 
 
 class SiglipSdpaAttention(nnx.Module): 
@@ -187,5 +187,50 @@ class SiglipEncoder(nnx.Module):
 
         return x 
 
+class SiglipVisionEmbeddings(nnx.Module): 
+    def __init__(
+        self, 
+        config: SiglipVisionConfig,
+        dtype: jnp.dtype, 
+        rng: nnx.Rngs
+    ):
+        pass 
+
+    def __call__(
+        self,
+        x: jax.Array     
+    ) -> jax.Array:  
+        pass 
+    
+class SiglipVisionTransformer(nnx.Module): 
+    def __init__(
+        self, 
+        config: SiglipVisionConfig,
+        dtype: jnp.dtype, 
+        rng: nnx.Rngs, 
+        mesh: Mesh
+    ):
+        pass 
+
+    def __call__(
+        self,
+        x: jax.Array     
+    ) -> jax.Array:  
+        pass 
+    
+
 class SiglipModel(nnx.Module): 
-    pass 
+    def __init__(
+        self, 
+        config: SiglipVisionConfig,
+        dtype: jnp.dtype, 
+        rng: nnx.Rngs, 
+        mesh: Mesh
+    ):
+        pass 
+
+    def __call__(
+        self,
+        x: jax.Array     
+    ) -> jax.Array:  
+        ... 
